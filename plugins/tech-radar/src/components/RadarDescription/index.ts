@@ -13,4 +13,6 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-export { JobStatusModal } from './JobStatusModal';
+
+export { RadarDescription } from './RadarDescription';
+export type { Props } from './RadarDescription';

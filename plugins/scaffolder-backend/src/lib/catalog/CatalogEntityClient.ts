@@ -14,25 +14,18 @@
  * limitations under the License.
  */
 
-import { TemplateEntityV1alpha1 } from '@backstage/catalog-model';
-import { CatalogClient } from '@backstage/catalog-client';
 import {
-  ConflictError,
-  NotFoundError,
-  PluginEndpointDiscovery,
-} from '@backstage/backend-common';
+  TemplateEntityV1alpha1,
+  TemplateEntityV1beta2,
+} from '@backstage/catalog-model';
+import { CatalogApi } from '@backstage/catalog-client';
+import { ConflictError, NotFoundError } from '@backstage/backend-common';
 
 /**
  * A catalog client tailored for reading out entity data from the catalog.
  */
 export class CatalogEntityClient {
-  private readonly catalogClient: CatalogClient;
-
-  constructor(options: { discovery: PluginEndpointDiscovery }) {
-    this.catalogClient = new CatalogClient({
-      discoveryApi: options.discovery,
-    });
-  }
+  constructor(private readonly catalogClient: CatalogApi) {}
 
   /**
    * Looks up a single template using a template name.
@@ -42,7 +35,7 @@ export class CatalogEntityClient {
   async findTemplate(
     templateName: string,
     options?: { token?: string },
-  ): Promise<TemplateEntityV1alpha1> {
+  ): Promise<TemplateEntityV1alpha1 | TemplateEntityV1beta2> {
     const { items: templates } = (await this.catalogClient.getEntities(
       {
         filter: {
@@ -51,7 +44,7 @@ export class CatalogEntityClient {
         },
       },
       options,
-    )) as { items: TemplateEntityV1alpha1[] };
+    )) as { items: (TemplateEntityV1alpha1 | TemplateEntityV1beta2)[] };
 
     if (templates.length !== 1) {
       if (templates.length > 1) {

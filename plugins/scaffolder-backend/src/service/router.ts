@@ -44,7 +44,17 @@ import {
 } from '../scaffolder/tasks/TemplateConverter';
 import { registerLegacyActions } from '../scaffolder/stages/legacy';
 import { getWorkingDirectory } from './helpers';
-import { PluginDatabaseManager } from '@backstage/backend-common';
+import {
+  InputError,
+  NotFoundError,
+  PluginDatabaseManager,
+} from '@backstage/backend-common';
+import { CatalogApi } from '@backstage/catalog-client';
+import {
+  TemplateEntityV1alpha1,
+  TemplateEntityV1beta2,
+  Entity,
+} from '@backstage/catalog-model';
 
 export interface RouterOptions {
   preparers: PreparerBuilder;
@@ -54,8 +64,23 @@ export interface RouterOptions {
   logger: Logger;
   config: Config;
   dockerClient: Docker;
-  entityClient: CatalogEntityClient;
   database: PluginDatabaseManager;
+  catalogClient: CatalogApi;
+}
+
+function isAlpha1Template(
+  entity: TemplateEntityV1alpha1 | TemplateEntityV1beta2,
+): entity is TemplateEntityV1alpha1 {
+  return (
+    entity.apiVersion === 'backstage.io/v1alpha1' ||
+    entity.apiVersion === 'backstage.io/v1beta1'
+  );
+}
+
+function isBeta2Template(
+  entity: TemplateEntityV1alpha1 | TemplateEntityV1beta2,
+): entity is TemplateEntityV1beta2 {
+  return entity.apiVersion === 'backstage.io/v1beta2';
 }
 
 export async function createRouter(
@@ -71,13 +96,14 @@ export async function createRouter(
     logger: parentLogger,
     config,
     dockerClient,
-    entityClient,
     database,
+    catalogClient,
   } = options;
 
   const logger = parentLogger.child({ plugin: 'scaffolder' });
   const workingDirectory = await getWorkingDirectory(config, logger);
   const jobProcessor = await JobProcessor.fromConfig({ config, logger });
+  const entityClient = new CatalogEntityClient(catalogClient);
 
   const databaseTaskStore = await DatabaseTaskStore.create(
     await database.getClient(),
@@ -96,6 +122,7 @@ export async function createRouter(
     preparers,
     publishers,
     templaters,
+    catalogClient,
   });
 
   worker.start();
@@ -137,6 +164,11 @@ export async function createRouter(
       const template = await entityClient.findTemplate(templateName, {
         token: getBearerToken(req.headers.authorization),
       });
+      if (!isAlpha1Template(template)) {
+        throw new InputError(
+          `This endpoint does not support templates with version ${template.apiVersion}`,
+        );
+      }
 
       const validationResult: ValidatorResult = validate(
         values,
@@ -225,6 +257,77 @@ export async function createRouter(
 
   // NOTE: The v2 API is unstable
   router
+    .get(
+      '/v2/templates/:namespace/:kind/:name/parameter-schema',
+      async (req, res) => {
+        const { namespace, kind, name } = req.params;
+
+        if (namespace !== 'default') {
+          throw new InputError(
+            `Invalid namespace, only 'default' namespace is supported`,
+          );
+        }
+        if (kind.toLowerCase() !== 'template') {
+          throw new InputError(
+            `Invalid kind, only 'Template' kind is supported`,
+          );
+        }
+
+        const template = await entityClient.findTemplate(name);
+        if (isBeta2Template(template)) {
+          const parameters = [template.spec.parameters ?? []].flat();
+          res.json({
+            title: template.metadata.title ?? template.metadata.name,
+            steps: parameters.map(schema => ({
+              title: schema.title ?? 'Fill in template parameters',
+              schema,
+            })),
+          });
+        } else if (isAlpha1Template(template)) {
+          res.json({
+            title: template.metadata.title ?? template.metadata.name,
+            steps: [
+              {
+                title: 'Fill in template parameters',
+                schema: template.spec.schema,
+              },
+              {
+                title: 'Choose owner and repo',
+                schema: {
+                  type: 'object',
+                  required: ['storePath', 'owner'],
+                  properties: {
+                    owner: {
+                      type: 'string',
+                      title: 'Owner',
+                      description: 'Who is going to own this component',
+                    },
+                    storePath: {
+                      type: 'string',
+                      title: 'Store path',
+                      description:
+                        'A full URL to the repository that should be created. e.g https://github.com/backstage/new-repo',
+                    },
+                    access: {
+                      type: 'string',
+                      title: 'Access',
+                      description:
+                        'Who should have access, in org/team or user format',
+                    },
+                  },
+                },
+              },
+            ],
+          });
+        } else {
+          throw new InputError(
+            `Unsupported apiVersion field in schema entity, ${
+              (template as Entity).apiVersion
+            }`,
+          );
+        }
+      },
+    )
     .post('/v2/tasks', async (req, res) => {
       const templateName: string = req.body.templateName;
       const values: TemplaterValues = {
@@ -235,19 +338,54 @@ export async function createRouter(
       };
       const template = await entityClient.findTemplate(templateName);
 
-      const validationResult: ValidatorResult = validate(
-        values,
-        template.spec.schema,
-      );
+      let taskSpec;
+      if (isAlpha1Template(template)) {
+        const result = validate(values, template.spec.schema);
 
-      if (!validationResult.valid) {
-        res.status(400).json({ errors: validationResult.errors });
-        return;
+        if (!result.valid) {
+          res.status(400).json({ errors: result.errors });
+          return;
+        }
+
+        taskSpec = templateEntityToSpec(template, values);
+      } else if (isBeta2Template(template)) {
+        for (const parameters of [template.spec.parameters ?? []].flat()) {
+          const result = validate(values, parameters);
+
+          if (!result.valid) {
+            res.status(400).json({ errors: result.errors });
+            return;
+          }
+        }
+
+        taskSpec = {
+          values,
+          steps: template.spec.steps.map((step, index) => ({
+            ...step,
+            id: step.id ?? `step-${index + 1}`,
+            name: step.name ?? step.action,
+          })),
+          output: template.spec.output ?? {},
+        };
+      } else {
+        throw new InputError(
+          `Unsupported apiVersion field in schema entity, ${
+            (template as Entity).apiVersion
+          }`,
+        );
       }
-      const taskSpec = templateEntityToSpec(template, values);
+
       const result = await taskBroker.dispatch(taskSpec);
 
       res.status(201).json({ id: result.taskId });
+    })
+    .get('/v2/tasks/:taskId', async (req, res) => {
+      const { taskId } = req.params;
+      const task = await taskBroker.get(taskId);
+      if (!task) {
+        throw new NotFoundError(`Task with id ${taskId} does not exist`);
+      }
+      res.status(200).json(task);
     })
     .get('/v2/tasks/:taskId/eventstream', async (req, res) => {
       const { taskId } = req.params;

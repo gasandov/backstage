@@ -43,12 +43,14 @@ export type DbTaskEventRow = {
 };
 
 export type TaskSpec = {
+  values: JsonObject;
   steps: Array<{
     id: string;
     name: string;
     action: string;
-    parameters?: { [name: string]: JsonValue };
+    parameters?: JsonObject;
   }>;
+  output: { [name: string]: string };
 };
 
 export type DispatchResult = {
@@ -58,8 +60,8 @@ export type DispatchResult = {
 export interface Task {
   spec: TaskSpec;
   done: boolean;
-  emitLog(message: string): Promise<void>;
-  complete(result: CompletedTaskState): Promise<void>;
+  emitLog(message: string, metadata?: JsonValue): Promise<void>;
+  complete(result: CompletedTaskState, metadata?: JsonValue): Promise<void>;
   getWorkspaceName(): Promise<string>;
 }
 
@@ -90,6 +92,7 @@ export type TaskStoreGetEventsOptions = {
 };
 export interface TaskStore {
   createTask(task: TaskSpec): Promise<{ taskId: string }>;
+  getTask(taskId: string): Promise<DbTaskRow>;
   claimTask(): Promise<DbTaskRow | undefined>;
   completeTask(options: {
     taskId: string;

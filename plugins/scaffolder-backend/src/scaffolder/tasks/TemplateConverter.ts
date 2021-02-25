@@ -14,11 +14,11 @@
  * limitations under the License.
  */
 
-import { resolve as resolvePath } from 'path';
+import { resolve as resolvePath, dirname } from 'path';
 import { JsonValue } from '@backstage/config';
 import { TemplateEntityV1alpha1 } from '@backstage/catalog-model';
 import { Logger } from 'winston';
-import type { Writable } from 'stream';
+import { Writable } from 'stream';
 
 import { TaskSpec } from './types';
 import { ConflictError, NotFoundError } from '@backstage/backend-common';
@@ -39,7 +39,7 @@ export function templateEntityToSpec(
 
   let url: string;
   if (protocol === 'file') {
-    const path = resolvePath(location, template.spec.path || '.');
+    const path = resolvePath(dirname(location), template.spec.path || '.');
 
     url = `file://${path}`;
   } else {
@@ -69,14 +69,31 @@ export function templateEntityToSpec(
 
   steps.push({
     id: 'publish',
-    name: 'Publishing',
+    name: 'Publish',
     action: 'legacy:publish',
     parameters: {
       values,
     },
   });
 
-  return { steps };
+  steps.push({
+    id: 'register',
+    name: 'Register',
+    action: 'catalog:register',
+    parameters: {
+      catalogInfoUrl: '{{ steps.publish.output.catalogInfoUrl }}',
+    },
+  });
+
+  return {
+    values: {},
+    steps,
+    output: {
+      remoteUrl: '{{ steps.publish.output.remoteUrl }}',
+      catalogInfoUrl: '{{ steps.publish.output.catalogInfoUrl }}',
+      entityRef: '{{ steps.register.output.entityRef }}',
+    },
+  };
 }
 
 type ActionContext = {

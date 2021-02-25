@@ -13,4 +13,21 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-export { JobStage } from './JobStage';
+
+import { ConfigReader } from '@backstage/config';
+import { readAwsOrganizationConfig } from './config';
+
+describe('readAwsOrganizationConfig', () => {
+  it('applies all of the defaults', () => {
+    const config = {
+      provider: {
+        roleArn: 'aws::arn::foo',
+      },
+    };
+    const actual = readAwsOrganizationConfig(new ConfigReader(config));
+    const expected = {
+      roleArn: 'aws::arn::foo',
+    };
+    expect(actual).toEqual(expected);
+  });
+});
